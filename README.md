@@ -1,5 +1,7 @@
 # imgres
 
+<img src="https://raw.githubusercontent.com/LillyPK/imgres/master/imgres.jxl?sanitize=true" alt="Logos logo" width="250" align="right">
+
 `imgres` resizes raw RGBA pixel buffers using GPU compute shaders with [`wgpu`](https://wgpu.rs/).
 
 It accepts pixel data in memory rather than loading or saving image files. Your application is responsible for decoding images into RGBA pixels and encoding or displaying the result.
