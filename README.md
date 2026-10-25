@@ -19,17 +19,18 @@ Add `imgres` to your `Cargo.toml`:
 ```toml
 [dependencies]
 imgres = "0.1.0"
-```
-
-Cargo automatically installs `imgres`'s dependencies, including `wgpu`. If your application creates the `wgpu::Device` and `wgpu::Queue` passed to the resize functions, add `wgpu` as a direct dependency as well:
-
-```toml
-[dependencies]
-imgres = "0.1.0"
 wgpu = "30.0.1"
 ```
 
-## Library usage
+If you are using a local checkout, use a path dependency instead:
+
+```toml
+[dependencies]
+imgres = { path = "../imgres" }
+wgpu = "30.0.1"
+```
+
+## Example
 
 The following example resizes an RGBA `u8` image to `640 × 480`. It assumes your application has already created a `wgpu::Device` and `wgpu::Queue`.
 
@@ -120,6 +121,16 @@ Possible errors include:
 - `InvalidBufferLength` — the pixel buffer does not match the image dimensions.
 - `MapFailed` — the GPU readback buffer could not be mapped.
 - `UnsupportedTextureFormat` — the requested texture format is unsupported.
+
+## Viewer example
+
+The repository's `examples/viewer.rs` example is a separate test viewer. If its development dependencies are installed, run it with an image path:
+
+```sh
+cargo run --example viewer -- path/to/image.png
+```
+
+The viewer's image-loading and window-display dependencies are for the example only; `imgres` itself operates on raw pixel buffers.
 
 ## License
 
