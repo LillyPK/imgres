@@ -4,10 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "Uses WGPU to resize an image to the target resolution"
 license = "Apache-2.0"
-repository = "https://github.com/YOUR_USERNAME/my-crate"
+repository = "https://github.com/LillyPK/imgres/tree/main"
 readme = "README.md"
 keywords = ["image", "resize", "wgpu", "compute-shader", "hardware-acceleration"]
 categories = ["rendering"]
 
 
 [dependencies]
+bytemuck = "1.25.2"
+wgpu = "30.0.1"
