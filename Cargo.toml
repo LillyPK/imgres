@@ -13,3 +13,7 @@ categories = ["rendering"]
 [dependencies]
 bytemuck = "1.25.2"
 wgpu = "30.0.1"
+image = "0.25.10" # only for demo
+pollster = "1.0.1" # only for demo
+softbuffer = "0.4.8" # only for demo
+winit = "0.30.13" # only for demo
