@@ -6,7 +6,7 @@ description = "Uses WGPU to resize an image to the target resolution"
 license = "Apache-2.0"
 repository = "https://github.com/LillyPK/imgres/tree/main"
 readme = "README.md"
-keywords = ["image", "resize", "wgpu", "compute-shader", "hardware-acceleration"]
+keywords = ["image", "resize", "wgpu", "compute-shader", "gpu-acceleration"]
 categories = ["rendering"]
 
 
