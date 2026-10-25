@@ -321,7 +321,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-trait GpuPixel: bytemuck::Pod + Copy {
+pub trait GpuPixel: bytemuck::Pod + Copy {
     const FORMAT: wgpu::TextureFormat;
     const BYTES_PER_PIXEL: u32;
 
