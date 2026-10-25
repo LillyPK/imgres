@@ -1,4 +1,5 @@
 # imgres
+![imgres](https://github.com/LillyPK/imgres/edit/main/README.md?raw=true)
 
 `imgres` resizes raw RGBA pixel buffers using GPU compute shaders with [`wgpu`](https://wgpu.rs/).
 
