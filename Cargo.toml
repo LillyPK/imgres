@@ -1,6 +1,6 @@
 [package]
 name = "imgres"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Uses WGPU to resize an image to the target resolution"
 license = "Apache-2.0"

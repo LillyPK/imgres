@@ -1,9 +1,9 @@
-//! GPU-accelerated resizing for in-memory RGBA images.
+//! GPU-accelerated resizing for in memory RGBA images.
 //!
 //! The crate accepts pixel buffers rather than decoding or encoding image
 //! files. Create an [`Image`] with a nonzero [`Resolution`], then pass it to
 //! [`resize`], [`resize_u8`], or [`resize_u16`] along with a `wgpu` device and
-//! queue. Pixel data uses four channels per pixel in row-major RGBA order.
+//! queue. Pixel data uses four channels per pixel in row major RGBA order.
 //! Resizing uses bilinear filtering when either target dimension is larger
 //! than its source dimension, and an area-weighted box filter otherwise.
 
