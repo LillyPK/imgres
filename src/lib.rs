@@ -1,11 +1,26 @@
+//! GPU-accelerated resizing for in-memory RGBA images.
+//!
+//! The crate accepts pixel buffers rather than decoding or encoding image
+//! files. Create an [`Image`] with a nonzero [`Resolution`], then pass it to
+//! [`resize`], [`resize_u8`], or [`resize_u16`] along with a `wgpu` device and
+//! queue. Pixel data uses four channels per pixel in row-major RGBA order.
+//! Resizing uses bilinear filtering when either target dimension is larger
+//! than its source dimension, and an area-weighted box filter otherwise.
+
 use wgpu::util::DeviceExt;
 
+/// Errors that can occur while constructing an image or resizing it.
 #[derive(Debug)]
 pub enum ResizeError {
+    /// A resolution has a zero width or height.
     InvalidDimensions,
+    /// The dimensions or pixel size overflowed while calculating a buffer size.
     BufferSizeOverflow,
+    /// The pixel buffer does not contain exactly four values per pixel.
     InvalidBufferLength,
+    /// The GPU readback buffer could not be mapped.
     MapFailed,
+    /// Reserved for a request whose texture format is unsupported by the GPU.
     UnsupportedTextureFormat,
 }
 
@@ -17,13 +32,23 @@ impl std::fmt::Display for ResizeError {
 
 impl std::error::Error for ResizeError {}
 
+/// The width and height, in pixels, of an image.
+///
+/// Use [`Resolution::new`] to ensure both dimensions are nonzero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Resolution {
+    /// The image width in pixels.
     pub width: u32,
+    /// The image height in pixels.
     pub height: u32,
 }
 
 impl Resolution {
+    /// Creates a resolution with nonzero dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResizeError::InvalidDimensions`] if either dimension is zero.
     pub fn new(width: u32, height: u32) -> Result<Self, ResizeError> {
         if width == 0 || height == 0 {
             return Err(ResizeError::InvalidDimensions);
@@ -38,13 +63,26 @@ impl Resolution {
     }
 }
 
+/// An image resolution and its owned pixel buffer.
+///
+/// The buffer contains four channel values per pixel in row-major RGBA order.
+/// For example, an image with resolution `width` by `height` must contain exactly
+/// `width * height * 4` values.
 #[derive(Debug)]
 pub struct Image<T> {
+    /// The dimensions of this image.
     pub resolution: Resolution,
     pixels: Vec<T>,
 }
 
 impl<T> Image<T> {
+    /// Creates an image from its resolution and RGBA pixel data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResizeError::BufferSizeOverflow`] if the expected buffer
+    /// length cannot be represented, or [`ResizeError::InvalidBufferLength`]
+    /// if `pixels` does not contain exactly four values per pixel.
     pub fn new(
         resolution: Resolution,
         pixels: Vec<T>,
@@ -61,10 +99,12 @@ impl<T> Image<T> {
         Ok(Self { resolution, pixels })
     }
 
+    /// Borrows the row-major RGBA pixel data.
     pub fn pixels(&self) -> &[T] {
         &self.pixels
     }
 
+    /// Consumes the image and returns its owned pixel buffer.
     pub fn into_pixels(self) -> Vec<T> {
         self.pixels
     }
@@ -321,10 +361,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Describes the GPU texture representation and shader used by [`resize`].
+///
+/// The crate implements this trait for `u8` and `u16`. Custom implementations
+/// must use a texture format and shader compatible with the RGBA texture
+/// bindings and output representation expected by the resizing pipeline.
 pub trait GpuPixel: bytemuck::Pod + Copy {
+    /// The `wgpu` texture format used to store each pixel.
     const FORMAT: wgpu::TextureFormat;
+    /// The number of bytes occupied by one four-channel pixel.
     const BYTES_PER_PIXEL: u32;
 
+    /// Returns the WGSL shader source for the requested resize direction.
+    ///
+    /// `upscale` is true when at least one target dimension exceeds the
+    /// corresponding source dimension.
     fn shader(upscale: bool) -> &'static str;
 }
 
@@ -350,6 +401,24 @@ fn align_to(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
 }
 
+/// Resizes an image using the GPU.
+///
+/// The input and output contain four channel values per pixel in row-major
+/// RGBA order. Bilinear filtering is selected if either target dimension is
+/// larger than its corresponding source dimension; otherwise, resizing uses
+/// an area-weighted box filter. The returned image owns its CPU-side pixel
+/// buffer.
+///
+/// # Errors
+///
+/// Returns [`ResizeError::BufferSizeOverflow`] if a required buffer size
+/// overflows, [`ResizeError::InvalidBufferLength`] if the input pixel count
+/// does not match its resolution, or [`ResizeError::MapFailed`] if GPU
+/// readback cannot be mapped.
+///
+/// # Panics
+///
+/// This function panics if `device.poll` reports a GPU polling error.
 pub async fn resize<T: GpuPixel>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -599,6 +668,14 @@ pub async fn resize<T: GpuPixel>(
     Image::new(target, pixels)
 }
 
+/// Resizes an 8-bit-per-channel RGBA image using the GPU.
+///
+/// This is the `u8` convenience wrapper around [`resize`]. Its input and
+/// output use four `u8` channel values per pixel in row-major RGBA order.
+///
+/// # Errors
+///
+/// Returns the errors documented by [`resize`].
 pub async fn resize_u8(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -608,6 +685,14 @@ pub async fn resize_u8(
     resize(device, queue, input, target).await
 }
 
+/// Resizes a 16-bit-per-channel RGBA image using the GPU.
+///
+/// This is the `u16` convenience wrapper around [`resize`]. Its input and
+/// output use four `u16` channel values per pixel in row-major RGBA order.
+///
+/// # Errors
+///
+/// Returns the errors documented by [`resize`].
 pub async fn resize_u16(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
