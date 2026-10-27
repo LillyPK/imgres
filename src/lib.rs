@@ -13,20 +13,100 @@ use wgpu::util::DeviceExt;
 #[derive(Debug)]
 pub enum ResizeError {
     /// A resolution has a zero width or height.
-    InvalidDimensions,
-    /// The dimensions or pixel size overflowed while calculating a buffer size.
-    BufferSizeOverflow,
+    InvalidDimensions {
+        /// The supplied width, which is zero.
+        width: u32,
+        /// The supplied height, which is zero.
+        height: u32,
+    },
+    /// A buffer size could not be represented while performing this operation.
+    BufferSizeOverflow {
+        /// The calculation that overflowed.
+        operation: &'static str,
+    },
     /// The pixel buffer does not contain exactly four values per pixel.
-    InvalidBufferLength,
-    /// The GPU readback buffer could not be mapped.
-    MapFailed,
+    InvalidBufferLength {
+        /// The image width in pixels.
+        width: u32,
+        /// The image height in pixels.
+        height: u32,
+        /// The required number of RGBA channel values.
+        expected: usize,
+        /// The actual number of values in the buffer.
+        actual: usize,
+    },
+    /// The readback mapping callback did not deliver a result.
+    ReadbackCallbackLost,
+    /// The GPU rejected the request to map the readback buffer.
+    ReadbackMapFailed {
+        /// The underlying mapping error reported by `wgpu`.
+        message: String,
+    },
+    /// Polling the GPU device failed while waiting for readback.
+    DevicePollFailed {
+        /// The underlying polling error reported by `wgpu`.
+        message: String,
+    },
+    /// A GPU validation error occurred while setting up or submitting the resize.
+    GpuValidationFailed {
+        /// The validation error reported by `wgpu`.
+        message: String,
+    },
     /// Reserved for a request whose texture format is unsupported by the GPU.
     UnsupportedTextureFormat,
 }
 
 impl std::fmt::Display for ResizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::InvalidDimensions { width, height } => write!(
+                f,
+                "Invalid image dimensions: {width}×{height}. Width and height must both be greater than zero."
+            ),
+            Self::BufferSizeOverflow { operation } => write!(
+                f,
+                "The image buffer size overflowed while {operation}. Try smaller image dimensions."
+            ),
+            Self::InvalidBufferLength {
+                width,
+                height,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "Invalid RGBA buffer length for a {width}×{height} image: expected {expected} channel values, got {actual}. RGBA requires four values per pixel; check that the buffer includes alpha values and matches the supplied dimensions."
+                )?;
+                let rgb_length = (*expected / 4).checked_mul(3);
+                if rgb_length == Some(*actual) {
+                    write!(
+                        f,
+                        " The buffer length matches three-channel RGB data; convert it to RGBA by adding an alpha value for every pixel."
+                    )?;
+                }
+                Ok(())
+            }
+            Self::ReadbackCallbackLost => write!(
+                f,
+                "The GPU readback callback did not return a result. Retry the resize; if it persists, check whether the GPU device is still available."
+            ),
+            Self::ReadbackMapFailed { message } => write!(
+                f,
+                "Could not map the internal GPU readback buffer for CPU access: {message}. Retry the resize; if it persists, recreate the GPU device or report this error."
+            ),
+            Self::DevicePollFailed { message } => write!(
+                f,
+                "Failed while waiting for GPU readback: {message}. Check that the GPU device is still available and retry the operation."
+            ),
+            Self::GpuValidationFailed { message } => write!(
+                f,
+                "The GPU rejected the resize operation during validation: {message}. Check the requested dimensions and device format support; if those are valid, report this as a possible internal GPU setup issue."
+            ),
+            Self::UnsupportedTextureFormat => write!(
+                f,
+                "The GPU does not support the texture format required for this pixel type. Check the device's format capabilities."
+            ),
+        }
     }
 }
 
@@ -51,7 +131,7 @@ impl Resolution {
     /// Returns [`ResizeError::InvalidDimensions`] if either dimension is zero.
     pub fn new(width: u32, height: u32) -> Result<Self, ResizeError> {
         if width == 0 || height == 0 {
-            return Err(ResizeError::InvalidDimensions);
+            return Err(ResizeError::InvalidDimensions { width, height });
         }
         Ok(Self { width, height })
     }
@@ -59,8 +139,26 @@ impl Resolution {
     fn pixel_count(self) -> Result<usize, ResizeError> {
         (self.width as usize)
             .checked_mul(self.height as usize)
-            .ok_or(ResizeError::BufferSizeOverflow)
+            .ok_or(ResizeError::BufferSizeOverflow {
+                operation: "calculating the pixel count",
+            })
     }
+}
+
+fn rgba_buffer_len(resolution: Resolution) -> Result<usize, ResizeError> {
+    if resolution.width == 0 || resolution.height == 0 {
+        return Err(ResizeError::InvalidDimensions {
+            width: resolution.width,
+            height: resolution.height,
+        });
+    }
+
+    resolution
+        .pixel_count()?
+        .checked_mul(4)
+        .ok_or(ResizeError::BufferSizeOverflow {
+            operation: "calculating the RGBA channel count",
+        })
 }
 
 /// An image resolution and its owned pixel buffer.
@@ -80,20 +178,20 @@ impl<T> Image<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`ResizeError::BufferSizeOverflow`] if the expected buffer
-    /// length cannot be represented, or [`ResizeError::InvalidBufferLength`]
-    /// if `pixels` does not contain exactly four values per pixel.
-    pub fn new(
-        resolution: Resolution,
-        pixels: Vec<T>,
-    ) -> Result<Self, ResizeError> {
-        let expected = resolution
-            .pixel_count()?
-            .checked_mul(4)
-            .ok_or(ResizeError::BufferSizeOverflow)?;
+    /// Returns [`ResizeError::InvalidDimensions`] if either dimension is zero,
+    /// [`ResizeError::BufferSizeOverflow`] if the expected buffer length cannot
+    /// be represented, or [`ResizeError::InvalidBufferLength`] if `pixels` does
+    /// not contain exactly four values per pixel.
+    pub fn new(resolution: Resolution, pixels: Vec<T>) -> Result<Self, ResizeError> {
+        let expected = rgba_buffer_len(resolution)?;
 
         if pixels.len() != expected {
-            return Err(ResizeError::InvalidBufferLength);
+            return Err(ResizeError::InvalidBufferLength {
+                width: resolution.width,
+                height: resolution.height,
+                expected,
+                actual: pixels.len(),
+            });
         }
 
         Ok(Self { resolution, pixels })
@@ -397,10 +495,6 @@ impl GpuPixel for u16 {
     }
 }
 
-fn align_to(value: u32, alignment: u32) -> u32 {
-    value.div_ceil(alignment) * alignment
-}
-
 /// Resizes an image using the GPU.
 ///
 /// The input and output contain four channel values per pixel in row-major
@@ -411,36 +505,64 @@ fn align_to(value: u32, alignment: u32) -> u32 {
 ///
 /// # Errors
 ///
-/// Returns [`ResizeError::BufferSizeOverflow`] if a required buffer size
+/// Returns [`ResizeError::InvalidDimensions`] for zero-sized input or target
+/// dimensions, [`ResizeError::BufferSizeOverflow`] if a required buffer size
 /// overflows, [`ResizeError::InvalidBufferLength`] if the input pixel count
-/// does not match its resolution, or [`ResizeError::MapFailed`] if GPU
-/// readback cannot be mapped.
-///
-/// # Panics
-///
-/// This function panics if `device.poll` reports a GPU polling error.
+/// does not match its resolution, or a readback or GPU validation error if the
+/// GPU operation cannot be completed.
 pub async fn resize<T: GpuPixel>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     input: &Image<T>,
     target: Resolution,
 ) -> Result<Image<T>, ResizeError> {
-    let expected = input.resolution.pixel_count()?
-        .checked_mul(4)
-        .ok_or(ResizeError::BufferSizeOverflow)?;
+    let expected = rgba_buffer_len(input.resolution)?;
 
     if input.pixels.len() != expected {
-        return Err(ResizeError::InvalidBufferLength);
+        return Err(ResizeError::InvalidBufferLength {
+            width: input.resolution.width,
+            height: input.resolution.height,
+            expected,
+            actual: input.pixels.len(),
+        });
     }
 
-    let output_len = target.pixel_count()?
-        .checked_mul(4)
-        .ok_or(ResizeError::BufferSizeOverflow)?;
+    let output_len = rgba_buffer_len(target)?;
+    let output_byte_len = output_len.checked_mul(std::mem::size_of::<T>()).ok_or(
+        ResizeError::BufferSizeOverflow {
+            operation: "calculating the output byte length",
+        },
+    )?;
+    let source_bytes_per_row = input
+        .resolution
+        .width
+        .checked_mul(T::BYTES_PER_PIXEL)
+        .ok_or(ResizeError::BufferSizeOverflow {
+            operation: "calculating the source row byte length",
+        })?;
+    let unpadded_bytes_per_row =
+        target
+            .width
+            .checked_mul(T::BYTES_PER_PIXEL)
+            .ok_or(ResizeError::BufferSizeOverflow {
+                operation: "calculating the destination row byte length",
+            })?;
+    let padded_bytes_per_row = unpadded_bytes_per_row
+        .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        .checked_mul(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        .ok_or(ResizeError::BufferSizeOverflow {
+            operation: "aligning the destination row byte length",
+        })?;
+    let readback_size = (padded_bytes_per_row as u64)
+        .checked_mul(target.height as u64)
+        .ok_or(ResizeError::BufferSizeOverflow {
+            operation: "calculating the GPU readback buffer size",
+        })?;
 
-    let upscale = target.width > input.resolution.width
-        || target.height > input.resolution.height;
+    let upscale = target.width > input.resolution.width || target.height > input.resolution.height;
 
     let format = T::FORMAT;
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let src = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("resize-source"),
@@ -453,8 +575,7 @@ pub async fn resize<T: GpuPixel>(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
 
@@ -469,8 +590,7 @@ pub async fn resize<T: GpuPixel>(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::STORAGE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
 
@@ -484,9 +604,7 @@ pub async fn resize<T: GpuPixel>(
         bytemuck::cast_slice(&input.pixels),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(
-                input.resolution.width * T::BYTES_PER_PIXEL
-            ),
+            bytes_per_row: Some(source_bytes_per_row),
             rows_per_image: Some(input.resolution.height),
         },
         wgpu::Extent3d {
@@ -498,21 +616,17 @@ pub async fn resize<T: GpuPixel>(
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("resize-compute-shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            T::shader(upscale).into()
-        ),
+        source: wgpu::ShaderSource::Wgsl(T::shader(upscale).into()),
     });
 
-    let pipeline = device.create_compute_pipeline(
-        &wgpu::ComputePipelineDescriptor {
-            label: Some("resize-compute-pipeline"),
-            layout: None,
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        },
-    );
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("resize-compute-pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
 
     let uniforms = Uniforms {
         src_size: [
@@ -522,80 +636,54 @@ pub async fn resize<T: GpuPixel>(
         dst_size: [target.width as f32, target.height as f32],
     };
 
-    let uniform_buffer = device.create_buffer_init(
-        &wgpu::util::BufferInitDescriptor {
-            label: Some("resize-uniforms"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        },
-    );
+    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("resize-uniforms"),
+        contents: bytemuck::bytes_of(&uniforms),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
 
     let src_view = src.create_view(&Default::default());
     let dst_view = dst.create_view(&Default::default());
 
-    let bind_group = device.create_bind_group(
-        &wgpu::BindGroupDescriptor {
-            label: Some("resize-bind-group"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&src_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&dst_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-            ],
-        },
-    );
-
-    let unpadded_bytes_per_row = target.width
-        .checked_mul(T::BYTES_PER_PIXEL)
-        .ok_or(ResizeError::BufferSizeOverflow)?;
-
-    let padded_bytes_per_row = align_to(
-        unpadded_bytes_per_row,
-        wgpu::COPY_BYTES_PER_ROW_ALIGNMENT,
-    );
-
-    let readback_size = (padded_bytes_per_row as u64)
-        .checked_mul(target.height as u64)
-        .ok_or(ResizeError::BufferSizeOverflow)?;
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("resize-bind-group"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&src_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&dst_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform_buffer.as_entire_binding(),
+            },
+        ],
+    });
 
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("resize-readback"),
         size: readback_size,
-        usage: wgpu::BufferUsages::COPY_DST
-            | wgpu::BufferUsages::MAP_READ,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
 
-    let mut encoder = device.create_command_encoder(
-        &wgpu::CommandEncoderDescriptor {
-            label: Some("resize-command-encoder"),
-        },
-    );
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("resize-command-encoder"),
+    });
 
     {
-        let mut pass = encoder.begin_compute_pass(
-            &wgpu::ComputePassDescriptor {
-                label: Some("resize-compute-pass"),
-                timestamp_writes: None,
-            },
-        );
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("resize-compute-pass"),
+            timestamp_writes: None,
+        });
 
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(
-            target.width.div_ceil(16),
-            target.height.div_ceil(16),
-            1,
-        );
+        pass.dispatch_workgroups(target.width.div_ceil(16), target.height.div_ceil(16), 1);
     }
 
     encoder.copy_texture_to_buffer(
@@ -622,6 +710,12 @@ pub async fn resize<T: GpuPixel>(
 
     queue.submit(Some(encoder.finish()));
 
+    if let Some(error) = error_scope.pop().await {
+        return Err(ResizeError::GpuValidationFailed {
+            message: error.to_string(),
+        });
+    }
+
     let slice = readback.slice(..);
     let (sender, receiver) = std::sync::mpsc::channel();
 
@@ -629,39 +723,38 @@ pub async fn resize<T: GpuPixel>(
         let _ = sender.send(result);
     });
 
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|error| ResizeError::DevicePollFailed {
+            message: error.to_string(),
+        })?;
 
-
-    receiver.recv()
-        .map_err(|_| ResizeError::MapFailed)?
-        .map_err(|_| ResizeError::MapFailed)?;
+    receiver
+        .recv()
+        .map_err(|_| ResizeError::ReadbackCallbackLost)?
+        .map_err(|error| ResizeError::ReadbackMapFailed {
+            message: error.to_string(),
+        })?;
 
     let mapped = slice
-    .get_mapped_range()
-    .map_err(|_| ResizeError::MapFailed)?;
-    let bytes_per_pixel = T::BYTES_PER_PIXEL as usize;
+        .get_mapped_range()
+        .map_err(|error| ResizeError::ReadbackMapFailed {
+            message: error.to_string(),
+        })?;
     let row_size = unpadded_bytes_per_row as usize;
     let padded_size = padded_bytes_per_row as usize;
 
-    let mut bytes = Vec::with_capacity(
-        output_len * std::mem::size_of::<T>()
-    );
+    let mut bytes = Vec::with_capacity(output_byte_len);
 
     for y in 0..target.height as usize {
         let start = y * padded_size;
-        bytes.extend_from_slice(
-            &mapped[start..start + row_size]
-        );
+        bytes.extend_from_slice(&mapped[start..start + row_size]);
     }
 
     drop(mapped);
     readback.unmap();
 
-    debug_assert_eq!(
-        bytes.len(),
-        output_len * std::mem::size_of::<T>()
-    );
-    let _ = bytes_per_pixel;
+    debug_assert_eq!(bytes.len(), output_byte_len);
 
     let pixels: Vec<T> = bytemuck::cast_slice(&bytes).to_vec();
 
